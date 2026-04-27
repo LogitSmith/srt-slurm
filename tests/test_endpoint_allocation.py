@@ -269,12 +269,35 @@ class TestEndpointsToProcesses:
         # Only leader gets http_port, child gets 0
         leader = [p for p in processes if p.is_leader][0]
         assert leader.http_port == 30000
-        assert leader.bootstrap_port == 31000  # prefill gets bootstrap port
+        assert leader.bootstrap_port == 30001  # prefill gets bootstrap port
 
         child = [p for p in processes if not p.is_leader][0]
         assert child.http_port == 0
         # All processes in prefill endpoint share the same bootstrap port
         assert child.bootstrap_port == leader.bootstrap_port
+
+    def test_one_node_prefill_decode_ports_do_not_conflict(self):
+        """Prefill bootstrap must not collide with decode HTTP on a shared node."""
+        endpoints = allocate_endpoints(
+            num_prefill=1,
+            num_decode=1,
+            num_agg=0,
+            gpus_per_prefill=1,
+            gpus_per_decode=1,
+            gpus_per_agg=8,
+            gpus_per_node=4,
+            available_nodes=("node0",),
+        )
+
+        processes = endpoints_to_processes(endpoints, base_sys_port=8081)
+
+        prefill = [p for p in processes if p.endpoint_mode == "prefill"][0]
+        decode = [p for p in processes if p.endpoint_mode == "decode"][0]
+
+        assert prefill.http_port == 30000
+        assert prefill.bootstrap_port == 30001
+        assert decode.http_port == 31000
+        assert prefill.bootstrap_port != decode.http_port
 
     def test_cuda_visible_devices(self):
         """Test that CUDA_VISIBLE_DEVICES is set correctly for each process."""

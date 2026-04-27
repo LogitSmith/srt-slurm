@@ -37,22 +37,22 @@ class NodePortAllocator:
     Port ranges (non-overlapping):
         - kv_events_port: 5550+  (global) - ZMQ port for kv-events publishing
         - nixl_port:      6550+  (global) - NIXL side channel for KV transfers (vLLM)
-        - http_port:      30000+ (per node) - HTTP serving port
-        - bootstrap_port: 31000+ (per node) - P/D coordination port (prefill only)
+        - http_port:      30000, 31000, ... (per node) - HTTP serving port
+        - bootstrap_port: 30001+ (per node) - P/D coordination port (prefill only)
 
     Example:
         allocator = NodePortAllocator()
 
         # Two workers on same node get different ports
         port1 = allocator.next_http_port("node0")  # 30000
-        port2 = allocator.next_http_port("node0")  # 30001
+        port2 = allocator.next_http_port("node0")  # 31000
 
         # Different node starts fresh
         port3 = allocator.next_http_port("node1")  # 30000
     """
 
     base_http_port: int = 30000
-    base_bootstrap_port: int = 31000
+    base_bootstrap_port: int = 30001
     base_kv_events_port: int = 5550
     base_nixl_port: int = 6550  # NIXL side channel ports (must not overlap with kv_events)
 

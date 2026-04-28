@@ -25,8 +25,9 @@ HOST=$(echo "$ENDPOINT" | sed 's|http://||' | cut -d: -f1)
 PORT=$(echo "$ENDPOINT" | sed 's|http://||' | cut -d: -f2 | cut -d/ -f1)
 
 MODEL_NAME="${BENCH_MODEL_NAME:-deepseek-ai/DeepSeek-R1}"
+TOKENIZER_PATH="${BENCH_TOKENIZER:-/model}"
 
-echo "SGLang-Bench Config: endpoint=${ENDPOINT}; isl=${ISL}; osl=${OSL}; concurrencies=${CONCURRENCIES}; req_rate=${REQ_RATE}"
+echo "SGLang-Bench Config: endpoint=${ENDPOINT}; isl=${ISL}; osl=${OSL}; concurrencies=${CONCURRENCIES}; req_rate=${REQ_RATE}; tokenizer=${TOKENIZER_PATH}"
 
 # Profiling shared helpers
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -105,6 +106,7 @@ for concurrency in "${CONCURRENCY_LIST[@]}"; do
     python3 -m sglang.bench_serving \
         --backend sglang-oai \
         --model "${MODEL_NAME}" \
+        --tokenizer "${TOKENIZER_PATH}" \
         --host "${HOST}" --port "${PORT}" \
         --dataset-name random \
         --max-concurrency "${concurrency}" \

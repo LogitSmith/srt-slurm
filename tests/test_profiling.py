@@ -327,6 +327,8 @@ class TestProfilingIntegration:
 
     def test_sglang_bench_script_exists(self):
         assert (SCRIPTS_DIR / "sglang-bench" / "bench.sh").exists()
+        script = (SCRIPTS_DIR / "sglang-bench" / "bench.sh").read_text()
+        assert '--tokenizer "${TOKENIZER_PATH}"' in script
 
     def test_sglang_bench_runner_validate_config(self):
         from srtctl.core.schema import (

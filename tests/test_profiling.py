@@ -3,6 +3,9 @@
 
 """Tests for profiling configuration, validation, and benchmark runner."""
 
+import os
+import subprocess
+
 import pytest
 
 from srtctl.benchmarks import get_runner
@@ -391,3 +394,51 @@ class TestProfilingIntegration:
             "1x2",
             "inf",
         ]
+
+    def test_stop_profile_http_error_records_failure(self, tmp_path):
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        curl_log = tmp_path / "curl.log"
+        fake_curl = fake_bin / "curl"
+        fake_curl.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"$*\" >> \"${CURL_LOG}\"\n"
+            "url=''\n"
+            "for arg in \"$@\"; do\n"
+            "  case \"$arg\" in\n"
+            "    http://*) url=\"$arg\" ;;\n"
+            "  esac\n"
+            "done\n"
+            "case \"$url\" in\n"
+            "  */stop_profile) exit 22 ;;\n"
+            "esac\n"
+            "exit 0\n"
+        )
+        fake_curl.chmod(0o755)
+
+        profile_dir = tmp_path / "profiles"
+        script = f"""
+set -euo pipefail
+source "{SCRIPTS_DIR / "lib" / "profiling.sh"}"
+export PROFILE_TYPE=nsys
+export PROFILE_OUTPUT_DIR="{profile_dir}"
+export PROFILE_PREFILL_ENDPOINTS=127.0.0.1:30000
+export PROFILE_PREFILL_START_STEP=0
+export PROFILE_PREFILL_STOP_STEP=10
+export PROFILE_FAIL_ON_ERROR=true
+export SRTCTL_FRONTEND_TYPE=sglang
+profiling_init_from_env
+start_all_profiling
+stop_all_profiling
+"""
+        env = os.environ.copy()
+        env["PATH"] = f"{fake_bin}:{env['PATH']}"
+        env["CURL_LOG"] = str(curl_log)
+
+        result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+
+        assert result.returncode == 1
+        events = (profile_dir / "profile-events.jsonl").read_text()
+        assert '"event":"start","phase":"prefill","endpoint":"127.0.0.1:30000","ok":true' in events
+        assert '"event":"stop","phase":"prefill","endpoint":"127.0.0.1:30000","ok":false' in events
+        assert "Warning: failed to stop profiling on 127.0.0.1:30000" in result.stdout

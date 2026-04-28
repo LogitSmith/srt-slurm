@@ -181,8 +181,15 @@ profiling__stop_profile_on_worker() {
             ;;
     esac
 
-    curl -sS -X POST "http://${hostport}${stop_path}" -H "Content-Type: application/json" -d '{}' >/dev/null || true
-    profiling__record_event "stop" "${phase}" "${hostport}" "true"
+    if curl -sS -f -X POST "http://${hostport}${stop_path}" -H "Content-Type: application/json" -d '{}' >/dev/null; then
+        profiling__record_event "stop" "${phase}" "${hostport}" "true"
+        return 0
+    fi
+    profiling__record_event "stop" "${phase}" "${hostport}" "false"
+    echo "Warning: failed to stop profiling on ${hostport}"
+    if profiling__bool "${PROFILE_FAIL_ON_ERROR}"; then
+        return 1
+    fi
     return 0
 }
 
@@ -314,14 +321,15 @@ stop_all_profiling() {
     IFS=',' read -r -a agg_endpoints <<< "${PROFILE_AGG_ENDPOINTS}"
 
     local ep
+    local stop_status=0
     for ep in "${prefill_endpoints[@]}"; do
-        profiling__stop_profile_on_worker "${ep}" "${WORKER_PORT}" "prefill"
+        profiling__stop_profile_on_worker "${ep}" "${WORKER_PORT}" "prefill" || stop_status=1
     done
     for ep in "${decode_endpoints[@]}"; do
-        profiling__stop_profile_on_worker "${ep}" "${WORKER_PORT}" "decode"
+        profiling__stop_profile_on_worker "${ep}" "${WORKER_PORT}" "decode" || stop_status=1
     done
     for ep in "${agg_endpoints[@]}"; do
-        profiling__stop_profile_on_worker "${ep}" "${WORKER_PORT}" "agg"
+        profiling__stop_profile_on_worker "${ep}" "${WORKER_PORT}" "agg" || stop_status=1
     done
 
     profiling__started=0
@@ -330,5 +338,5 @@ stop_all_profiling() {
         echo "Profiling results saved to ${PROFILE_OUTPUT_DIR}"
     fi
     echo ""
-    return 0
+    return "${stop_status}"
 }

@@ -569,6 +569,17 @@ class ProfilingPhaseConfig:
 
 
 @dataclass(frozen=True)
+class ProfilingScheduleConfig:
+    """Benchmark-aware profiling trigger configuration."""
+
+    trigger: str = "before-benchmark"  # "before-benchmark" or "benchmark-measurement"
+    target_concurrency: int | str | None = None  # exact concurrency, "first", "last", or "max"
+    fail_on_profile_error: bool = False
+
+    Schema: ClassVar[builtins.type[Schema]] = Schema
+
+
+@dataclass(frozen=True)
 class ProfilingConfig:
     """Profiling configuration.
 
@@ -585,6 +596,7 @@ class ProfilingConfig:
     prefill: ProfilingPhaseConfig | None = None
     decode: ProfilingPhaseConfig | None = None
     aggregated: ProfilingPhaseConfig | None = None
+    schedule: ProfilingScheduleConfig | None = None
 
     @property
     def enabled(self) -> bool:
@@ -600,6 +612,11 @@ class ProfilingConfig:
     def is_torch(self) -> bool:
         """Check if using PyTorch profiler."""
         return self.type == "torch"
+
+    @property
+    def effective_schedule(self) -> ProfilingScheduleConfig:
+        """Return the configured schedule or the legacy global trigger."""
+        return self.schedule or ProfilingScheduleConfig()
 
     def _get_phase_config(self, mode: str) -> ProfilingPhaseConfig | None:
         """Get the phase config for the given mode."""
@@ -994,6 +1011,14 @@ class SrtConfig:
         prof = self.profiling
         if not prof.enabled:
             return
+
+        if prof.schedule is not None:
+            allowed_triggers = {"before-benchmark", "benchmark-measurement"}
+            if prof.schedule.trigger not in allowed_triggers:
+                raise ValidationError(
+                    "profiling.schedule.trigger must be one of: "
+                    + ", ".join(sorted(allowed_triggers))
+                )
 
         r = self.resources
         is_disaggregated = r.is_disaggregated

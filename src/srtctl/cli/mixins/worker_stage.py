@@ -83,12 +83,21 @@ class WorkerStageMixin:
         """Start a single worker process (one srun per node, used by SGLang)."""
         mode = process.endpoint_mode
         index = process.endpoint_index
+        same_node_processes = [p for p in endpoint_processes if p.node == process.node]
+        worker_stem = f"{process.node}_{mode}_w{index}"
+        if len(same_node_processes) > 1:
+            gpu_suffix = "-".join(str(i) for i in sorted(process.gpu_indices))
+            worker_stem = f"{worker_stem}_r{process.node_rank}_g{gpu_suffix}"
 
         logger.info("Starting %s worker %d on %s", mode, index, process.node)
 
         # Log and config files
-        worker_log = self.runtime.log_dir / f"{process.node}_{mode}_w{index}.out"
-        config_dump = self.runtime.log_dir / f"{process.node}_config.json"
+        worker_log = self.runtime.log_dir / f"{worker_stem}.out"
+        if len(same_node_processes) > 1:
+            config_dump_name = f"{worker_stem}_config.json"
+        else:
+            config_dump_name = f"{process.node}_config.json"
+        config_dump = self.runtime.log_dir / config_dump_name
 
         # Profiling setup
         profiling = self.config.profiling
@@ -96,7 +105,7 @@ class WorkerStageMixin:
         if profiling.enabled:
             (self.runtime.log_dir / "profiles" / mode).mkdir(parents=True, exist_ok=True)
         if profiling.is_nsys:
-            nsys_output = f"/logs/profiles/{mode}/{process.node}_{mode}_w{index}_profile"
+            nsys_output = f"/logs/profiles/{mode}/{worker_stem}_profile"
             nsys_prefix = profiling.get_nsys_prefix(nsys_output, frontend_type=self.config.frontend.type)
 
         # Build command using backend's method

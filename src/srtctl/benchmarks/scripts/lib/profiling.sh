@@ -10,6 +10,13 @@ profiling__warn() {
     return 0
 }
 
+profiling__bool() {
+    case "${1:-}" in
+        true|TRUE|True|1|yes|YES|Yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 profiling__is_enabled() {
     local profile_type="${PROFILE_TYPE:-}"
     if [[ -z "${profile_type}" || "${profile_type}" == "none" ]]; then
@@ -42,6 +49,56 @@ profiling__normalize_endpoint() {
     return 0
 }
 
+profiling__json_escape() {
+    printf '%s' "${1:-}" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+profiling__write_plan() {
+    if ! profiling__is_enabled || [[ -z "${PROFILE_OUTPUT_DIR:-}" ]]; then
+        return 0
+    fi
+
+    local plan_file="${PROFILE_PLAN_FILE:-${PROFILE_OUTPUT_DIR}/profile-plan.json}"
+    mkdir -p "$(dirname "${plan_file}")" 2>/dev/null || true
+
+    {
+        printf '{\n'
+        printf '  "timestamp": "%s",\n' "$(date -Iseconds 2>/dev/null || date)"
+        printf '  "type": "%s",\n' "$(profiling__json_escape "${PROFILE_TYPE}")"
+        printf '  "trigger": "%s",\n' "$(profiling__json_escape "${PROFILE_TRIGGER}")"
+        printf '  "target_concurrency": "%s",\n' "$(profiling__json_escape "${PROFILE_TARGET_CONCURRENCY}")"
+        printf '  "resolved_target_concurrency": "%s",\n' "$(profiling__json_escape "${PROFILE_RESOLVED_TARGET_CONCURRENCY}")"
+        printf '  "current_concurrency": "%s",\n' "$(profiling__json_escape "${PROFILE_CURRENT_CONCURRENCY}")"
+        printf '  "prefill_steps": {"start": %s, "stop": %s},\n' "${PROFILE_PREFILL_START_STEP}" "${PROFILE_PREFILL_STOP_STEP}"
+        printf '  "decode_steps": {"start": %s, "stop": %s},\n' "${PROFILE_DECODE_START_STEP}" "${PROFILE_DECODE_STOP_STEP}"
+        printf '  "agg_steps": {"start": %s, "stop": %s},\n' "${PROFILE_AGG_START_STEP}" "${PROFILE_AGG_STOP_STEP}"
+        printf '  "prefill_endpoints": "%s",\n' "$(profiling__json_escape "${PROFILE_PREFILL_ENDPOINTS}")"
+        printf '  "decode_endpoints": "%s",\n' "$(profiling__json_escape "${PROFILE_DECODE_ENDPOINTS}")"
+        printf '  "agg_endpoints": "%s"\n' "$(profiling__json_escape "${PROFILE_AGG_ENDPOINTS}")"
+        printf '}\n'
+    } > "${plan_file}" || true
+}
+
+profiling__record_event() {
+    if ! profiling__is_enabled || [[ -z "${PROFILE_OUTPUT_DIR:-}" ]]; then
+        return 0
+    fi
+
+    local event="$1"
+    local phase="$2"
+    local endpoint="$3"
+    local ok="$4"
+    local events_file="${PROFILE_EVENTS_FILE:-${PROFILE_OUTPUT_DIR}/profile-events.jsonl}"
+    mkdir -p "$(dirname "${events_file}")" 2>/dev/null || true
+    printf '{"timestamp":"%s","event":"%s","phase":"%s","endpoint":"%s","ok":%s,"concurrency":"%s"}\n' \
+        "$(date -Iseconds 2>/dev/null || date)" \
+        "$(profiling__json_escape "${event}")" \
+        "$(profiling__json_escape "${phase}")" \
+        "$(profiling__json_escape "${endpoint}")" \
+        "${ok}" \
+        "$(profiling__json_escape "${PROFILE_CURRENT_CONCURRENCY}")" >> "${events_file}" || true
+}
+
 profiling__start_profile_on_worker() {
     local endpoint="$1"
     local start_step="$2"
@@ -49,6 +106,7 @@ profiling__start_profile_on_worker() {
     local output_dir="$4"
     local profile_type="$5"
     local worker_port="$6"
+    local phase="${7:-unknown}"
 
     local hostport
     hostport="$(profiling__normalize_endpoint "${endpoint}" "${worker_port}")"
@@ -85,15 +143,21 @@ profiling__start_profile_on_worker() {
     esac
 
     if curl -sS -f -X POST "http://${hostport}${start_path}" -H "Content-Type: application/json" -d "${payload}" >/dev/null; then
+        profiling__record_event "start" "${phase}" "${hostport}" "true"
         return 0
     fi
+    profiling__record_event "start" "${phase}" "${hostport}" "false"
     echo "Warning: failed to start profiling on ${hostport}"
+    if profiling__bool "${PROFILE_FAIL_ON_ERROR}"; then
+        return 1
+    fi
     return 0
 }
 
 profiling__stop_profile_on_worker() {
     local endpoint="$1"
     local worker_port="$2"
+    local phase="${3:-unknown}"
 
     local hostport
     hostport="$(profiling__normalize_endpoint "${endpoint}" "${worker_port}")"
@@ -118,6 +182,7 @@ profiling__stop_profile_on_worker() {
     esac
 
     curl -sS -X POST "http://${hostport}${stop_path}" -H "Content-Type: application/json" -d '{}' >/dev/null || true
+    profiling__record_event "stop" "${phase}" "${hostport}" "true"
     return 0
 }
 
@@ -140,6 +205,13 @@ profiling_init_from_env() {
     PROFILE_DECODE_STOP_STEP="${PROFILE_DECODE_STOP_STEP:-50}"
     PROFILE_AGG_START_STEP="${PROFILE_AGG_START_STEP:-0}"
     PROFILE_AGG_STOP_STEP="${PROFILE_AGG_STOP_STEP:-50}"
+    PROFILE_TRIGGER="${PROFILE_TRIGGER:-before-benchmark}"
+    PROFILE_TARGET_CONCURRENCY="${PROFILE_TARGET_CONCURRENCY:-}"
+    PROFILE_RESOLVED_TARGET_CONCURRENCY="${PROFILE_RESOLVED_TARGET_CONCURRENCY:-}"
+    PROFILE_CURRENT_CONCURRENCY="${PROFILE_CURRENT_CONCURRENCY:-}"
+    PROFILE_FAIL_ON_ERROR="${PROFILE_FAIL_ON_ERROR:-false}"
+    PROFILE_PLAN_FILE="${PROFILE_PLAN_FILE:-}"
+    PROFILE_EVENTS_FILE="${PROFILE_EVENTS_FILE:-}"
 
     profiling__started=0
 }
@@ -196,6 +268,10 @@ start_all_profiling() {
     echo "  Decode workers: ${PROFILE_DECODE_ENDPOINTS:-none}"
     echo "  Prefill steps: ${PROFILE_PREFILL_START_STEP} - ${PROFILE_PREFILL_STOP_STEP}"
     echo "  Decode steps: ${PROFILE_DECODE_START_STEP} - ${PROFILE_DECODE_STOP_STEP}"
+    echo "  Trigger: ${PROFILE_TRIGGER:-before-benchmark}"
+    if [[ -n "${PROFILE_CURRENT_CONCURRENCY:-}" ]]; then
+        echo "  Current concurrency: ${PROFILE_CURRENT_CONCURRENCY}"
+    fi
 
     local -a prefill_endpoints=()
     local -a decode_endpoints=()
@@ -205,19 +281,21 @@ start_all_profiling() {
     IFS=',' read -r -a agg_endpoints <<< "${PROFILE_AGG_ENDPOINTS}"
 
     local ep
+    local start_status=0
+    profiling__write_plan
     for ep in "${prefill_endpoints[@]}"; do
-        profiling__start_profile_on_worker "${ep}" "${PROFILE_PREFILL_START_STEP}" "${PROFILE_PREFILL_STOP_STEP}" "${prefill_output_dir}" "${PROFILE_TYPE}" "${WORKER_PORT}"
+        profiling__start_profile_on_worker "${ep}" "${PROFILE_PREFILL_START_STEP}" "${PROFILE_PREFILL_STOP_STEP}" "${prefill_output_dir}" "${PROFILE_TYPE}" "${WORKER_PORT}" "prefill" || start_status=1
     done
     for ep in "${decode_endpoints[@]}"; do
-        profiling__start_profile_on_worker "${ep}" "${PROFILE_DECODE_START_STEP}" "${PROFILE_DECODE_STOP_STEP}" "${decode_output_dir}" "${PROFILE_TYPE}" "${WORKER_PORT}"
+        profiling__start_profile_on_worker "${ep}" "${PROFILE_DECODE_START_STEP}" "${PROFILE_DECODE_STOP_STEP}" "${decode_output_dir}" "${PROFILE_TYPE}" "${WORKER_PORT}" "decode" || start_status=1
     done
     for ep in "${agg_endpoints[@]}"; do
-        profiling__start_profile_on_worker "${ep}" "${PROFILE_AGG_START_STEP}" "${PROFILE_AGG_STOP_STEP}" "${agg_output_dir}" "${PROFILE_TYPE}" "${WORKER_PORT}"
+        profiling__start_profile_on_worker "${ep}" "${PROFILE_AGG_START_STEP}" "${PROFILE_AGG_STOP_STEP}" "${agg_output_dir}" "${PROFILE_TYPE}" "${WORKER_PORT}" "agg" || start_status=1
     done
 
     profiling__started=1
     echo ""
-    return 0
+    return "${start_status}"
 }
 
 stop_all_profiling() {
@@ -237,13 +315,13 @@ stop_all_profiling() {
 
     local ep
     for ep in "${prefill_endpoints[@]}"; do
-        profiling__stop_profile_on_worker "${ep}" "${WORKER_PORT}"
+        profiling__stop_profile_on_worker "${ep}" "${WORKER_PORT}" "prefill"
     done
     for ep in "${decode_endpoints[@]}"; do
-        profiling__stop_profile_on_worker "${ep}" "${WORKER_PORT}"
+        profiling__stop_profile_on_worker "${ep}" "${WORKER_PORT}" "decode"
     done
     for ep in "${agg_endpoints[@]}"; do
-        profiling__stop_profile_on_worker "${ep}" "${WORKER_PORT}"
+        profiling__stop_profile_on_worker "${ep}" "${WORKER_PORT}" "agg"
     done
 
     profiling__started=0
@@ -254,5 +332,3 @@ stop_all_profiling() {
     echo ""
     return 0
 }
-
-

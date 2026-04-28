@@ -22,6 +22,24 @@ class TestProfilingConfig:
         assert profiling.is_nsys is False
         assert profiling.is_torch is False
         assert profiling.type == "none"
+        assert profiling.effective_schedule.trigger == "before-benchmark"
+
+    def test_profiling_schedule_config(self):
+        """Test benchmark-aware profiling schedule config."""
+        from srtctl.core.schema import ProfilingConfig, ProfilingScheduleConfig
+
+        profiling = ProfilingConfig(
+            type="nsys",
+            schedule=ProfilingScheduleConfig(
+                trigger="benchmark-measurement",
+                target_concurrency="max",
+                fail_on_profile_error=True,
+            ),
+        )
+
+        assert profiling.effective_schedule.trigger == "benchmark-measurement"
+        assert profiling.effective_schedule.target_concurrency == "max"
+        assert profiling.effective_schedule.fail_on_profile_error is True
 
     def test_nsys_profiling(self):
         """Test nsys profiling configuration."""
@@ -227,6 +245,38 @@ class TestProfilingValidation:
             ),
         )
         assert config.profiling.enabled
+
+    def test_invalid_profiling_schedule_trigger(self):
+        """Reject unsupported profiling schedule triggers."""
+        from marshmallow import ValidationError
+
+        from srtctl.core.schema import (
+            ModelConfig,
+            ProfilingConfig,
+            ProfilingPhaseConfig,
+            ProfilingScheduleConfig,
+            ResourceConfig,
+            SrtConfig,
+        )
+
+        with pytest.raises(ValidationError, match="profiling.schedule.trigger"):
+            SrtConfig(
+                name="test",
+                model=ModelConfig(path="/model", container="/container", precision="fp8"),
+                resources=ResourceConfig(
+                    gpu_type="h100",
+                    prefill_nodes=1,
+                    decode_nodes=1,
+                    prefill_workers=1,
+                    decode_workers=1,
+                ),
+                profiling=ProfilingConfig(
+                    type="torch",
+                    prefill=ProfilingPhaseConfig(start_step=0, stop_step=50),
+                    decode=ProfilingPhaseConfig(start_step=0, stop_step=50),
+                    schedule=ProfilingScheduleConfig(trigger="after-the-fact"),
+                ),
+            )
 
 
 class TestProfilingIntegration:

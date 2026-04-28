@@ -101,6 +101,41 @@ trap cleanup EXIT
 # Parse concurrency list
 IFS='x' read -r -a CONCURRENCY_LIST <<< "$CONCURRENCIES"
 
+resolve_profile_target_concurrency() {
+    local target="${PROFILE_TARGET_CONCURRENCY:-max}"
+    local count="${#CONCURRENCY_LIST[@]}"
+    if [[ "${count}" -eq 0 ]]; then
+        echo ""
+        return 0
+    fi
+
+    case "${target}" in
+        first)
+            echo "${CONCURRENCY_LIST[0]}"
+            ;;
+        last)
+            echo "${CONCURRENCY_LIST[$((count - 1))]}"
+            ;;
+        ""|max)
+            local max="${CONCURRENCY_LIST[0]}"
+            local concurrency
+            for concurrency in "${CONCURRENCY_LIST[@]}"; do
+                if [[ "${concurrency}" -gt "${max}" ]]; then
+                    max="${concurrency}"
+                fi
+            done
+            echo "${max}"
+            ;;
+        *)
+            echo "${target}"
+            ;;
+    esac
+}
+
+if [[ "${PROFILE_TRIGGER:-before-benchmark}" == "benchmark-measurement" ]]; then
+    PROFILE_RESOLVED_TARGET_CONCURRENCY="$(resolve_profile_target_concurrency)"
+fi
+
 # Quick curl to verify endpoint is working
 echo "Verifying endpoint..."
 curl -s "${ENDPOINT}/v1/chat/completions" \
@@ -119,12 +154,19 @@ ulimit -n 65536 2>/dev/null || true  # May fail in containers without CAP_SYS_RE
 result_dir="/logs/sa-bench_isl_${ISL}_osl_${OSL}"
 mkdir -p "$result_dir"
 
-# Start profiling before benchmark
-start_all_profiling
+if [[ "${PROFILE_TRIGGER:-before-benchmark}" == "before-benchmark" ]]; then
+    start_all_profiling
+elif [[ "${PROFILE_TRIGGER}" == "benchmark-measurement" ]]; then
+    echo "Profiling will start for measured concurrency: ${PROFILE_RESOLVED_TARGET_CONCURRENCY}"
+else
+    echo "Warning: unsupported PROFILE_TRIGGER='${PROFILE_TRIGGER}', profiling will not start"
+fi
+
+profile_triggered=0
 
 for concurrency in "${CONCURRENCY_LIST[@]}"; do
 
-    num_warmup_prompts=$((concurrency * 2))
+    num_warmup_prompts=$((concurrency * NUM_WARMUP_MULT))
     python3 -u "${WORK_DIR}/benchmark_serving.py" \
         --model "${MODEL_NAME}" --tokenizer "${MODEL_PATH}" \
         --host "$HOST" --port "$PORT" \
@@ -144,7 +186,7 @@ for concurrency in "${CONCURRENCY_LIST[@]}"; do
         "${CHAT_TEMPLATE_ARGS[@]}" \
         "${CUSTOM_TOKENIZER_ARGS[@]}"
 
-    num_prompts=$((concurrency * 10))
+    num_prompts=$((concurrency * NUM_PROMPTS_MULT))
     
     # Generate result filename based on mode
     if [ "$IS_DISAGGREGATED" = "true" ]; then
@@ -155,6 +197,14 @@ for concurrency in "${CONCURRENCY_LIST[@]}"; do
     
     echo "Running benchmark with concurrency: $concurrency"
     echo "$(date '+%Y-%m-%d %H:%M:%S')"
+
+    profile_this_concurrency=0
+    if [[ "${PROFILE_TRIGGER:-before-benchmark}" == "benchmark-measurement" && "${concurrency}" == "${PROFILE_RESOLVED_TARGET_CONCURRENCY}" ]]; then
+        PROFILE_CURRENT_CONCURRENCY="${concurrency}"
+        profile_this_concurrency=1
+        profile_triggered=1
+        start_all_profiling
+    fi
 
     set -x
     python3 -u "${WORK_DIR}/benchmark_serving.py" \
@@ -178,10 +228,18 @@ for concurrency in "${CONCURRENCY_LIST[@]}"; do
         --save-result --result-dir "$result_dir" --result-filename "$result_filename"
     set +x
 
+    if [[ "${profile_this_concurrency}" == "1" ]]; then
+        stop_all_profiling
+    fi
+
     echo "$(date '+%Y-%m-%d %H:%M:%S')"
     echo "Completed benchmark with concurrency: $concurrency"
     echo "-----------------------------------------"
 done
+
+if [[ "${PROFILE_TRIGGER:-before-benchmark}" == "benchmark-measurement" && "${profile_triggered}" != "1" ]]; then
+    echo "Warning: target profiling concurrency '${PROFILE_RESOLVED_TARGET_CONCURRENCY}' was not found"
+fi
 
 stop_all_profiling
 

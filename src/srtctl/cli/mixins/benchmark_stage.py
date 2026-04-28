@@ -193,6 +193,11 @@ class BenchmarkStageMixin:
 
         # Profiling type (nsys, torch)
         env["PROFILE_TYPE"] = p.type
+        schedule = p.effective_schedule
+        env["PROFILE_TRIGGER"] = schedule.trigger
+        if schedule.target_concurrency is not None:
+            env["PROFILE_TARGET_CONCURRENCY"] = str(schedule.target_concurrency)
+        env["PROFILE_FAIL_ON_ERROR"] = str(schedule.fail_on_profile_error).lower()
 
         # Phase-specific step configs
         if p.prefill:
@@ -225,10 +230,12 @@ class BenchmarkStageMixin:
 
         use_sys_port = self.config.frontend.type == "dynamo"
         for process in self.backend_processes:
-            if not process.is_leader:
+            if not use_sys_port and not process.is_leader:
                 continue
             leader_ip = get_hostname_ip(process.node, self.runtime.network_interface)
             port = process.sys_port if use_sys_port else process.http_port
+            if port <= 0:
+                continue
             leader_endpoint = f"{leader_ip}:{port}"
             if process.endpoint_mode == "prefill":
                 prefill_ips.append(leader_ip)

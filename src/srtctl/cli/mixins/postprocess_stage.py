@@ -297,6 +297,7 @@ echo "files total"
                 container_image="python:3.11",
                 container_mounts={str(self.runtime.log_dir): "/logs"},
                 env_to_set=env,
+                srun_options=self.runtime.srun_options,
             )
             proc.wait(timeout=600)  # 10 min timeout for install + parse + full sync
 
@@ -439,6 +440,7 @@ echo "AI analysis complete."
                 container_image="python:3.11",
                 container_mounts={str(self.runtime.log_dir): "/logs"},
                 env_to_set=env_to_set,
+                srun_options=self.runtime.srun_options,
             )
 
             # Wait for completion with timeout (15 minutes for install + analysis)

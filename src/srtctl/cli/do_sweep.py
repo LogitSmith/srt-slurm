@@ -132,14 +132,16 @@ class SweepOrchestrator(WorkerStageMixin, FrontendStageMixin, BenchmarkStageMixi
             critical=True,
         )
 
-        # 300s timeout to handle slow container imports on first run
-        logger.info("Waiting for NATS (port 4222) on %s...", infra_node)
-        if not wait_for_port(infra_node, 4222, timeout=300):
+        # First-time Pyxis/Enroot image imports can take several minutes before
+        # setup_head.py even starts running inside the container.
+        infra_timeout = float(os.environ.get("SRTCTL_INFRA_READY_TIMEOUT", "900"))
+        logger.info("Waiting for NATS (port 4222) on %s (timeout %.0fs)...", infra_node, infra_timeout)
+        if not wait_for_port(infra_node, 4222, timeout=infra_timeout):
             raise RuntimeError("NATS failed to start")
         logger.info("NATS is ready")
 
-        logger.info("Waiting for etcd (port 2379) on %s...", infra_node)
-        if not wait_for_port(infra_node, 2379, timeout=300):
+        logger.info("Waiting for etcd (port 2379) on %s (timeout %.0fs)...", infra_node, infra_timeout)
+        if not wait_for_port(infra_node, 2379, timeout=infra_timeout):
             raise RuntimeError("etcd failed to start")
         logger.info("etcd is ready")
 

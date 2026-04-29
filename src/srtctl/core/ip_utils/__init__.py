@@ -10,6 +10,8 @@ This module provides:
 """
 
 import logging
+import ipaddress
+import re
 import subprocess
 from pathlib import Path
 
@@ -17,6 +19,29 @@ logger = logging.getLogger(__name__)
 
 # Path to the bash scripts directory
 SCRIPTS_DIR = Path(__file__).parent
+
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _extract_ip_address(output: str) -> str | None:
+    """Extract the selected IPv4 address from helper output.
+
+    Some Slurm/Pyxis configurations print status lines such as
+    ``srun: Step created ...`` on the same stream as command output. The remote
+    shell helper should print exactly one address, but filter defensively here
+    so those status lines cannot become part of a host/address value.
+    """
+    candidates: list[str] = []
+    for match in _IPV4_RE.finditer(output):
+        value = match.group(0)
+        try:
+            ip = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        if ip.is_unspecified or ip.is_loopback or ip.is_link_local:
+            continue
+        candidates.append(str(ip))
+    return candidates[-1] if candidates else None
 
 
 def _run_bash_function(
@@ -99,8 +124,15 @@ def get_node_ip(
     )
 
     if success and output:
-        logger.debug("Resolved IP for %s: %s", node, output)
-        return output
+        ip = _extract_ip_address(output)
+        if ip:
+            if ip != output:
+                logger.debug("Filtered IP helper output for %s: %r -> %s", node, output, ip)
+            else:
+                logger.debug("Resolved IP for %s: %s", node, ip)
+            return ip
+        logger.error("IP helper for node %s did not return a usable address: %s", node, output)
+        return None
     else:
         logger.error("Failed to get IP for node %s: %s", node, output)
         return None

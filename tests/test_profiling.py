@@ -47,6 +47,15 @@ class TestProfilingConfig:
         prefix_router = profiling.get_nsys_prefix("/output/test", frontend_type="sglangrouter")
         assert "--trace-fork-before-exec=true" not in prefix_router
 
+    def test_nsys_output_paths_for_mpi_endpoint_workers_are_rank_qualified(self):
+        """MPI endpoint launches need one report path per Slurm rank."""
+        from srtctl.cli.mixins.worker_stage import _build_nsys_output_path
+
+        assert _build_nsys_output_path("agg", "node-a", 0) == "/logs/profiles/agg/node-a_agg_w0_profile"
+        assert _build_nsys_output_path("decode", "node-a", 0, rank_qualified=True) == (
+            "/logs/profiles/decode/node-a_decode_w0_rank%q{SLURM_PROCID}_local%q{SLURM_LOCALID}_profile"
+        )
+
     def test_torch_profiling(self):
         """Test torch profiling configuration."""
         from srtctl.core.schema import ProfilingConfig, ProfilingPhaseConfig

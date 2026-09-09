@@ -14,9 +14,11 @@ This script is called from within the sbatch job and coordinates:
 
 import argparse
 import functools
+import itertools
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -59,6 +61,55 @@ from srtctl.ports import (
 )
 
 logger = logging.getLogger(__name__)
+
+_NSYS_EXPORT_WAIT_SECONDS = 300.0
+_NSYS_EXPORT_POLL_SECONDS = 0.5
+
+
+def _complete_sqlite_export(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as database:
+            return database.execute("PRAGMA quick_check").fetchone() == ("ok",)
+    except sqlite3.DatabaseError:
+        return False
+
+
+def wait_for_nsys_sqlite_exports(
+    log_dir: Path,
+    *,
+    timeout_seconds: float = _NSYS_EXPORT_WAIT_SECONDS,
+    poll_seconds: float = _NSYS_EXPORT_POLL_SECONDS,
+) -> None:
+    """Wait for asynchronous Nsight exports before terminating serving workers."""
+    reports = tuple(sorted(log_dir.rglob("*.nsys-rep")))
+    if not reports:
+        return
+
+    exports = tuple(report.with_suffix(".sqlite") for report in reports)
+    deadline = time.monotonic() + timeout_seconds
+    previous_complete_sizes: tuple[int, ...] | None = None
+    while time.monotonic() < deadline:
+        if all(_complete_sqlite_export(path) for path in exports):
+            sizes = tuple(path.stat().st_size for path in exports)
+            if sizes == previous_complete_sizes:
+                logger.info("Nsight SQLite export complete for %d report(s)", len(exports))
+                return
+            previous_complete_sizes = sizes
+        else:
+            previous_complete_sizes = None
+        time.sleep(poll_seconds)
+
+    pending = ", ".join(str(path.relative_to(log_dir)) for path in exports)
+    raise RuntimeError(f"Nsight SQLite export did not finish before worker cleanup: {pending}")
+
+
+def _requests_nsys_sqlite_export(arguments: list[str] | None) -> bool:
+    arguments = arguments or []
+    return "--export=sqlite" in arguments or any(
+        argument == "--export" and following == "sqlite" for argument, following in itertools.pairwise(arguments)
+    )
 
 
 def _build_mooncake_master_command(mooncake_cfg: object) -> list[str]:
@@ -853,6 +904,16 @@ class SweepOrchestrator(
             logger.info("Cleanup")
             # NOTE: finalize before registry.cleanup() so samples and manifest are durable.
             exit_code = self.finalize_power_telemetry(exit_code, interrupted=stop_event.is_set())
+            if (
+                exit_code == 0
+                and self.config.profiling.is_nsys
+                and _requests_nsys_sqlite_export(self.config.profiling.extra_nsys_args)
+            ):
+                try:
+                    wait_for_nsys_sqlite_exports(self.runtime.log_dir)
+                except RuntimeError:
+                    logger.exception("Nsight export finalization failed")
+                    exit_code = 1
             stop_event.set()
             registry.cleanup()
             # After cleanup so the GPUs are idle before node state is reverted.

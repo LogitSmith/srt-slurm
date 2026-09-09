@@ -36,7 +36,7 @@ from srtctl.cli.mixins import (
 from srtctl.core.config import load_config
 from srtctl.core.health import wait_for_port
 from srtctl.core.lockfile import write_lockfile
-from srtctl.core.nsys_export import wait_for_sqlite_exports
+from srtctl.core.nsys_export import NsysExport, finalize_sqlite_exports
 from srtctl.core.processes import (
     ManagedProcess,
     ProcessRegistry,
@@ -99,7 +99,7 @@ class SweepOrchestrator(
     config: SrtConfig
     runtime: RuntimeContext
     serve_only: bool = False
-    nsys_export_statuses: list[Path] = field(default_factory=list, init=False)
+    nsys_exports: list[NsysExport] = field(default_factory=list, init=False)
 
     @property
     def backend(self):
@@ -858,13 +858,19 @@ class SweepOrchestrator(
             logger.info("Cleanup")
             # NOTE: finalize before registry.cleanup() so samples and manifest are durable.
             exit_code = self.finalize_power_telemetry(exit_code, interrupted=stop_event.is_set())
-            if benchmark_succeeded and exit_code == 0 and self.nsys_export_statuses and not stop_event.is_set():
+            if benchmark_succeeded and exit_code == 0 and self.nsys_exports and not stop_event.is_set():
                 try:
-                    wait_for_sqlite_exports(self.nsys_export_statuses, cancel_event=stop_event)
+                    finalize_sqlite_exports(
+                        self.nsys_exports,
+                        container_image=str(self.runtime.container_image),
+                        container_mounts=self.runtime.container_mounts,
+                        srun_options=self.runtime.srun_options,
+                        cancel_event=stop_event,
+                    )
                 except (RuntimeError, OSError):
                     logger.exception("Nsight export finalization failed")
                     exit_code = 1
-            if self.nsys_export_statuses and stop_event.is_set():
+            if self.nsys_exports and stop_event.is_set():
                 exit_code = exit_code or 1
             stop_event.set()
             registry.cleanup()

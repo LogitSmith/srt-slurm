@@ -14,16 +14,14 @@ This script is called from within the sbatch job and coordinates:
 
 import argparse
 import functools
-import itertools
 import json
 import logging
 import os
-import sqlite3
 import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from srtctl.backends.sglang import SGLangProtocol
@@ -38,6 +36,7 @@ from srtctl.cli.mixins import (
 from srtctl.core.config import load_config
 from srtctl.core.health import wait_for_port
 from srtctl.core.lockfile import write_lockfile
+from srtctl.core.nsys_export import wait_for_sqlite_exports
 from srtctl.core.processes import (
     ManagedProcess,
     ProcessRegistry,
@@ -61,55 +60,6 @@ from srtctl.ports import (
 )
 
 logger = logging.getLogger(__name__)
-
-_NSYS_EXPORT_WAIT_SECONDS = 300.0
-_NSYS_EXPORT_POLL_SECONDS = 0.5
-
-
-def _complete_sqlite_export(path: Path) -> bool:
-    if not path.is_file():
-        return False
-    try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as database:
-            return database.execute("PRAGMA quick_check").fetchone() == ("ok",)
-    except sqlite3.DatabaseError:
-        return False
-
-
-def wait_for_nsys_sqlite_exports(
-    log_dir: Path,
-    *,
-    timeout_seconds: float = _NSYS_EXPORT_WAIT_SECONDS,
-    poll_seconds: float = _NSYS_EXPORT_POLL_SECONDS,
-) -> None:
-    """Wait for asynchronous Nsight exports before terminating serving workers."""
-    reports = tuple(sorted(log_dir.rglob("*.nsys-rep")))
-    if not reports:
-        return
-
-    exports = tuple(report.with_suffix(".sqlite") for report in reports)
-    deadline = time.monotonic() + timeout_seconds
-    previous_complete_sizes: tuple[int, ...] | None = None
-    while time.monotonic() < deadline:
-        if all(_complete_sqlite_export(path) for path in exports):
-            sizes = tuple(path.stat().st_size for path in exports)
-            if sizes == previous_complete_sizes:
-                logger.info("Nsight SQLite export complete for %d report(s)", len(exports))
-                return
-            previous_complete_sizes = sizes
-        else:
-            previous_complete_sizes = None
-        time.sleep(poll_seconds)
-
-    pending = ", ".join(str(path.relative_to(log_dir)) for path in exports)
-    raise RuntimeError(f"Nsight SQLite export did not finish before worker cleanup: {pending}")
-
-
-def _requests_nsys_sqlite_export(arguments: list[str] | None) -> bool:
-    arguments = arguments or []
-    return "--export=sqlite" in arguments or any(
-        argument == "--export" and following == "sqlite" for argument, following in itertools.pairwise(arguments)
-    )
 
 
 def _build_mooncake_master_command(mooncake_cfg: object) -> list[str]:
@@ -149,6 +99,7 @@ class SweepOrchestrator(
     config: SrtConfig
     runtime: RuntimeContext
     serve_only: bool = False
+    nsys_export_statuses: list[Path] = field(default_factory=list, init=False)
 
     @property
     def backend(self):
@@ -809,6 +760,7 @@ class SweepOrchestrator(
         start_process_monitor(stop_event, registry)
 
         exit_code = 1
+        benchmark_succeeded = False
 
         try:
             # Stage 0: Bare-host node setup (GPU clocks, kernel modules). Runs
@@ -869,6 +821,7 @@ class SweepOrchestrator(
 
             if self.serve_only:
                 exit_code = self.run_benchmark(registry, stop_event, reporter)
+                benchmark_succeeded = exit_code == 0
             elif os.environ.get("EVAL_ONLY", "false").lower() == "true":
                 reporter.report(JobStatus.BENCHMARK, JobStage.BENCHMARK, "Running eval-only evaluation")
                 logger.info("EVAL_ONLY=true: Skipping benchmark stage and running lm-eval evaluation...")
@@ -884,6 +837,7 @@ class SweepOrchestrator(
             else:
                 # Stage 4: Benchmark (status reported AFTER health check passes)
                 exit_code = self.run_benchmark(registry, stop_event, reporter)
+                benchmark_succeeded = exit_code == 0
 
                 # Stage 5: Post-benchmark eval (optional, non-fatal)
                 if os.environ.get("RUN_EVAL", "false").lower() == "true" and exit_code == 0:
@@ -904,16 +858,14 @@ class SweepOrchestrator(
             logger.info("Cleanup")
             # NOTE: finalize before registry.cleanup() so samples and manifest are durable.
             exit_code = self.finalize_power_telemetry(exit_code, interrupted=stop_event.is_set())
-            if (
-                exit_code == 0
-                and self.config.profiling.is_nsys
-                and _requests_nsys_sqlite_export(self.config.profiling.extra_nsys_args)
-            ):
+            if benchmark_succeeded and exit_code == 0 and self.nsys_export_statuses and not stop_event.is_set():
                 try:
-                    wait_for_nsys_sqlite_exports(self.runtime.log_dir)
-                except RuntimeError:
+                    wait_for_sqlite_exports(self.nsys_export_statuses, cancel_event=stop_event)
+                except (RuntimeError, OSError):
                     logger.exception("Nsight export finalization failed")
                     exit_code = 1
+            if self.nsys_export_statuses and stop_event.is_set():
+                exit_code = exit_code or 1
             stop_event.set()
             registry.cleanup()
             # After cleanup so the GPUs are idle before node state is reverted.

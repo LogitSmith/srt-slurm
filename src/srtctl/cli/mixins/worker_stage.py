@@ -11,10 +11,12 @@ import logging
 import shlex
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from srtctl.core.fingerprint import generate_capture_script
 from srtctl.core.health import wait_for_health
+from srtctl.core.nsys_export import prepare_sqlite_export
 from srtctl.core.processes import ManagedProcess, NamedProcesses
 from srtctl.core.schema import build_otel_env, installs_dynamo
 from srtctl.core.slurm import CONTAINER_REMAP_ROOT_EXPORT, get_hostname_ip, start_srun_process
@@ -45,6 +47,7 @@ class WorkerStageMixin:
     # Type hints for mixin dependencies
     config: "SrtConfig"
     runtime: "RuntimeContext"
+    nsys_export_statuses: list[Path]
 
     @property
     def backend(self) -> Any:
@@ -146,6 +149,7 @@ class WorkerStageMixin:
         # Profiling setup
         profiling = self.config.profiling
         nsys_prefix = None
+        statuses: list[Path] = []
         if profiling.enabled:
             (self.runtime.log_dir / "profiles" / mode).mkdir(parents=True, exist_ok=True)
         if profiling.is_nsys:
@@ -154,6 +158,7 @@ class WorkerStageMixin:
             nsys_prefix = profiling.get_nsys_prefix(
                 nsys_output, frontend_type=self.config.frontend.type, backend_type=self.config.backend_type
             )
+            nsys_prefix, statuses = prepare_sqlite_export(nsys_prefix, self.runtime.log_dir)
 
         # Build command using backend's method
         cmd = self.backend.build_worker_command(
@@ -260,6 +265,8 @@ class WorkerStageMixin:
             srun_export_env=CONTAINER_REMAP_ROOT_EXPORT if installs_dynamo(self.config) else None,
             het_group=process.het_group,
         )
+        if statuses:
+            self.nsys_export_statuses.extend(statuses)
 
         return ManagedProcess(
             name=f"{mode}_{index}_{process.node}",
@@ -301,6 +308,7 @@ class WorkerStageMixin:
         # Profiling setup
         profiling = self.config.profiling
         nsys_prefix = None
+        statuses: list[Path] = []
         if profiling.enabled:
             (self.runtime.log_dir / "profiles" / mode).mkdir(parents=True, exist_ok=True)
         if profiling.is_nsys:
@@ -308,6 +316,7 @@ class WorkerStageMixin:
             nsys_prefix = profiling.get_nsys_prefix(
                 nsys_output, frontend_type=self.config.frontend.type, backend_type=self.config.backend_type
             )
+            nsys_prefix, statuses = prepare_sqlite_export(nsys_prefix, self.runtime.log_dir, ranks=total_gpus)
 
         # Build command using backend's method
         cmd = self.backend.build_worker_command(
@@ -408,6 +417,8 @@ class WorkerStageMixin:
             srun_options=srun_options,
             het_group=leader.het_group,
         )
+        if statuses:
+            self.nsys_export_statuses.extend(statuses)
 
         return ManagedProcess(
             name=f"{mode}_{index}_{leader.node}",
